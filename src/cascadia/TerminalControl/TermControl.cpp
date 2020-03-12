@@ -22,6 +22,7 @@ using namespace winrt::Windows::UI::Xaml::Input;
 using namespace winrt::Windows::UI::Xaml::Automation::Peers;
 using namespace winrt::Windows::UI::Core;
 using namespace winrt::Windows::UI::ViewManagement;
+using namespace winrt::Windows::UI::Input;
 using namespace winrt::Windows::System;
 using namespace winrt::Microsoft::Terminal::Settings;
 using namespace winrt::Windows::ApplicationModel::DataTransfer;
@@ -813,6 +814,65 @@ namespace winrt::Microsoft::Terminal::TerminalControl::implementation
     }
 
     // Method Description:
+    // - Send this particular mouse event to the terminal.
+    //   See Terminal::SendMouseEvent for more information.
+    // Arguments:
+    // - point: the PointerPoint object representing a mouse event from our XAML input handler
+    // - goingDown: true, if the button was pressed. False, if it was released.
+    //              Mouse moved events must only be encoded as the button being pressed, not released.
+    bool TermControl::_TrySendMouseEvent(Windows::UI::Input::PointerPoint const& point)
+    {
+        // If the user is holding down Shift, suppress mouse events
+        // TODO GH#4875: disable/customize this functionality
+        const auto modifiers = _GetPressedModifierKeys();
+        if (modifiers.IsShiftPressed())
+        {
+            return false;
+        }
+
+        const auto props = point.Properties();
+
+        // Get the terminal position relative to the viewport
+        const auto terminalPosition = _GetTerminalPosition(point.Position());
+
+        // Which mouse button changed state (and how)
+        unsigned int uiButton{};
+        switch (props.PointerUpdateKind())
+        {
+        case PointerUpdateKind::LeftButtonPressed:
+            uiButton = WM_LBUTTONDOWN;
+            break;
+        case PointerUpdateKind::LeftButtonReleased:
+            uiButton = WM_LBUTTONUP;
+            break;
+        case PointerUpdateKind::MiddleButtonPressed:
+            uiButton = WM_MBUTTONDOWN;
+            break;
+        case PointerUpdateKind::MiddleButtonReleased:
+            uiButton = WM_MBUTTONUP;
+            break;
+        case PointerUpdateKind::RightButtonPressed:
+            uiButton = WM_RBUTTONDOWN;
+            break;
+        case PointerUpdateKind::RightButtonReleased:
+            uiButton = WM_RBUTTONUP;
+            break;
+        default:
+            uiButton = WM_MOUSEMOVE;
+        }
+
+        // Mouse wheel data
+        const short sWheelDelta = ::base::saturated_cast<short>(props.MouseWheelDelta());
+        if (sWheelDelta != 0 && !props.IsHorizontalMouseWheel())
+        {
+            // if we have a mouse wheel delta and it wasn't a horizontal wheel motion
+            uiButton = WM_MOUSEWHEEL;
+        }
+
+        return _terminal->SendMouseEvent(terminalPosition, uiButton, modifiers, sWheelDelta);
+    }
+
+    // Method Description:
     // - handle a mouse click event. Begin selection process.
     // Arguments:
     // - sender: the XAML element responding to the pointer input
@@ -846,6 +906,12 @@ namespace winrt::Microsoft::Terminal::TerminalControl::implementation
             // macro directly with a VirtualKeyModifiers
             const auto altEnabled = WI_IsFlagSet(modifiers, static_cast<uint32_t>(VirtualKeyModifiers::Menu));
             const auto shiftEnabled = WI_IsFlagSet(modifiers, static_cast<uint32_t>(VirtualKeyModifiers::Shift));
+
+            if (_TrySendMouseEvent(point))
+            {
+                args.Handled(true);
+                return;
+            }
 
             if (point.Properties().IsLeftButtonPressed())
             {
@@ -929,6 +995,12 @@ namespace winrt::Microsoft::Terminal::TerminalControl::implementation
 
         if (ptr.PointerDeviceType() == Windows::Devices::Input::PointerDeviceType::Mouse || ptr.PointerDeviceType() == Windows::Devices::Input::PointerDeviceType::Pen)
         {
+            if (_TrySendMouseEvent(point))
+            {
+                args.Handled(true);
+                return;
+            }
+
             if (point.Properties().IsLeftButtonPressed())
             {
                 _clickDrag = true;
@@ -1015,6 +1087,17 @@ namespace winrt::Microsoft::Terminal::TerminalControl::implementation
 
         if (ptr.PointerDeviceType() == Windows::Devices::Input::PointerDeviceType::Mouse || ptr.PointerDeviceType() == Windows::Devices::Input::PointerDeviceType::Pen)
         {
+            const auto modifiers = static_cast<uint32_t>(args.KeyModifiers());
+            // static_cast to a uint32_t because we can't use the WI_IsFlagSet
+            // macro directly with a VirtualKeyModifiers
+            const auto shiftEnabled = WI_IsFlagSet(modifiers, static_cast<uint32_t>(VirtualKeyModifiers::Shift));
+
+            if (_TrySendMouseEvent(point))
+            {
+                args.Handled(true);
+                return;
+            }
+
             // Only a left click release when copy on select is active should perform a copy.
             // Right clicks and middle clicks should not need to do anything when released.
             if (_terminal->IsCopyOnSelectActive() && point.Properties().PointerUpdateKind() == Windows::UI::Input::PointerUpdateKind::LeftButtonReleased)
@@ -1064,6 +1147,12 @@ namespace winrt::Microsoft::Terminal::TerminalControl::implementation
         const auto modifiers = static_cast<uint32_t>(args.KeyModifiers());
         const auto ctrlPressed = WI_IsFlagSet(modifiers, static_cast<uint32_t>(VirtualKeyModifiers::Control));
         const auto shiftPressed = WI_IsFlagSet(modifiers, static_cast<uint32_t>(VirtualKeyModifiers::Shift));
+
+        if (_TrySendMouseEvent(point))
+        {
+            args.Handled(true);
+            return;
+        }
 
         if (ctrlPressed && shiftPressed)
         {
