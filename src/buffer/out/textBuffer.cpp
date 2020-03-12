@@ -1872,9 +1872,18 @@ std::string TextBuffer::GenRTF(const TextAndColor& rows, const int fontHeightPoi
 // Arguments:
 // - oldBuffer - the text buffer to copy the contents FROM
 // - newBuffer - the text buffer to copy the contents TO
+// - lastCharacterViewport - Optional. If the caller knows that the last
+//   nonspace character is in a particular Viewport, the caller can provide this
+//   parameter as an optimization, as opposed to searching the entire buffer.
+// - oldViewportTop - Optional. The caller can provide a row in this parameter
+//   and we'll calculate the position of the _end_ of that row in the new
+//   buffer. The row's new value is placed back into this pointer.
 // Return Value:
 // - S_OK if we successfully copied the contents to the new buffer, otherwise an appropriate HRESULT.
-HRESULT TextBuffer::Reflow(TextBuffer& oldBuffer, TextBuffer& newBuffer)
+HRESULT TextBuffer::Reflow(TextBuffer& oldBuffer,
+                           TextBuffer& newBuffer,
+                           const std::optional<Viewport> lastCharacterViewport,
+                           short* const oldViewportTop)
 {
     Cursor& oldCursor = oldBuffer.GetCursor();
     Cursor& newCursor = newBuffer.GetCursor();
@@ -1886,14 +1895,16 @@ HRESULT TextBuffer::Reflow(TextBuffer& oldBuffer, TextBuffer& newBuffer)
     // place the new cursor back on the equivalent character in
     // the new buffer.
     const COORD cOldCursorPos = oldCursor.GetPosition();
-    const COORD cOldLastChar = oldBuffer.GetLastNonSpaceCharacter();
+    const COORD cOldLastChar = lastCharacterViewport.has_value() ?
+                                   oldBuffer.GetLastNonSpaceCharacter(lastCharacterViewport.value()) :
+                                   oldBuffer.GetLastNonSpaceCharacter();
 
-    short const cOldRowsTotal = cOldLastChar.Y + 1;
-    short const cOldColsTotal = oldBuffer.GetSize().Width();
+    const short cOldRowsTotal = cOldLastChar.Y + 1;
+    const short cOldColsTotal = oldBuffer.GetSize().Width();
 
     COORD cNewCursorPos = { 0 };
     bool fFoundCursorPos = false;
-
+    bool foundOldRow = false;
     HRESULT hr = S_OK;
     // Loop through all the rows of the old buffer and reprint them into the new buffer
     for (short iOldRow = 0; iOldRow < cOldRowsTotal; iOldRow++)
@@ -1953,6 +1964,19 @@ HRESULT TextBuffer::Reflow(TextBuffer& oldBuffer, TextBuffer& newBuffer)
             }
             CATCH_RETURN();
         }
+
+        // If we found the old row that the caller was interested in, set the
+        // out value of that parameter to the cursor's current Y position (the
+        // new location of the _end_ of that row in the buffer).
+        if (oldViewportTop && !foundOldRow)
+        {
+            if (iOldRow >= *oldViewportTop)
+            {
+                *oldViewportTop = newCursor.GetPosition().Y;
+                foundOldRow = true;
+            }
+        }
+
         if (SUCCEEDED(hr))
         {
             // If we didn't have a full row to copy, insert a new
